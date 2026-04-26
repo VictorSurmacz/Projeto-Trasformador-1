@@ -1,0 +1,25 @@
+# Ambiente virtual
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Dataset bruto
+cattle-detection-and-counting-in-uav-images-DatasetNinja/
+
+# Dataset processado
+dataset/
+
+# Treinamento YOLO
+runs/
+
+# Pesos
+*.pt
+
+# Arquivos grandes
+*.zip
+
+# IDE
+.vscode/
+.idea/
