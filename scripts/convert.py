@@ -166,9 +166,9 @@ def verify_no_orphans(out_base: Path):
 def write_yaml(out_base: Path):
     yaml_content = """path: .
 
-train: images/train
-val: images/val
-test: images/test
+train: dataset/images/train
+val: dataset/images/val
+test: dataset/images/test
 
 names:
   0: cattle
