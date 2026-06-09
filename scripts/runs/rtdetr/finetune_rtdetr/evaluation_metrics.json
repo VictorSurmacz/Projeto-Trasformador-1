@@ -1,0 +1,41 @@
+{
+  "weights": "runs\\rtdetr\\finetune_rtdetr-5\\weights\\best.pt",
+  "data": "dataset\\data.yaml",
+  "iou_threshold": 0.5,
+  "conf": 0.25,
+  "imgsz": 1024,
+  "device": "0",
+  "sliced": false,
+  "overlap": null,
+  "slice_nms_iou": null,
+  "results": [
+    {
+      "split": "val",
+      "images": 102,
+      "sliced": false,
+      "tp": 239,
+      "fp": 56,
+      "fn": 13,
+      "precision": 0.8101694915254237,
+      "recall": 0.9484126984126984,
+      "f1": 0.8738574040219377,
+      "map50": 0.8963042686266024,
+      "mae": 0.5784313725490197,
+      "rmse": 1.2086291051126852
+    },
+    {
+      "split": "test",
+      "images": 14,
+      "sliced": false,
+      "tp": 46,
+      "fp": 20,
+      "fn": 16,
+      "precision": 0.696969696969697,
+      "recall": 0.7419354838709677,
+      "f1": 0.71875,
+      "map50": 0.7112195980120508,
+      "mae": 1.8571428571428572,
+      "rmse": 2.23606797749979
+    }
+  ]
+}

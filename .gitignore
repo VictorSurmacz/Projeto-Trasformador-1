@@ -11,8 +11,6 @@ cattle-detection-and-counting-in-uav-images-DatasetNinja/
 # Dataset processado
 dataset/
 
-# Treinamento YOLO
-runs/
 
 # Pesos
 *.pt

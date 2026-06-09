@@ -1,0 +1,41 @@
+{
+  "weights": "runs\\yolo11n\\finetune_sliced-4\\weights\\best.pt",
+  "data": "dataset\\data.yaml",
+  "iou_threshold": 0.5,
+  "conf": 0.25,
+  "imgsz": 1024,
+  "device": "0",
+  "sliced": true,
+  "overlap": 0.2,
+  "slice_nms_iou": 0.5,
+  "results": [
+    {
+      "split": "val",
+      "images": 404,
+      "sliced": true,
+      "tp": 331,
+      "fp": 195,
+      "fn": 18,
+      "precision": 0.629277566539924,
+      "recall": 0.9484240687679083,
+      "f1": 0.7565714285714286,
+      "map50": 0.8802132765594067,
+      "mae": 0.452970297029703,
+      "rmse": 0.9987616094320243
+    },
+    {
+      "split": "test",
+      "images": 14,
+      "sliced": true,
+      "tp": 50,
+      "fp": 89,
+      "fn": 12,
+      "precision": 0.3597122302158273,
+      "recall": 0.8064516129032258,
+      "f1": 0.4975124378109453,
+      "map50": 0.731768341307815,
+      "mae": 5.5,
+      "rmse": 6.99489609848291
+    }
+  ]
+}
