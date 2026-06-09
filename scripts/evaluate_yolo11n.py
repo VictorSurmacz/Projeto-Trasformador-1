@@ -9,7 +9,7 @@ from ultralytics import YOLO
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Avalia deteccao e contagem para YOLO11n")
+    parser = argparse.ArgumentParser(description="Avalia deteccao e contagem para YOLO11n com NMS entre fatias")
     parser.add_argument("--weights", type=Path, required=True, help="Peso treinado (.pt)")
     parser.add_argument("--data", type=Path, default=Path("dataset/data.yaml"), help="Arquivo data.yaml")
     parser.add_argument("--split", nargs="+", default=["val", "test"], choices=["train", "val", "test"])
@@ -18,8 +18,30 @@ def parse_args():
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--save-json", type=Path, default=Path("runs/yolo11n/evaluation_metrics.json"))
+    parser.add_argument(
+        "--sliced",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Ativa modo slicing: divide cada imagem em 4 fatias, roda inferencia por fatia e aplica NMS global",
+    )
+    parser.add_argument(
+        "--overlap",
+        type=float,
+        default=0.2,
+        help="Fracao de sobreposicao usada no slicing (deve ser igual ao valor usado no slice_dataset.py)",
+    )
+    parser.add_argument(
+        "--slice-nms-iou",
+        type=float,
+        default=0.5,
+        help="IoU threshold do NMS aplicado entre fatias para remover deteccoes duplicadas",
+    )
     return parser.parse_args()
 
+
+# ---------------------------------------------------------------------------
+# Geometria
+# ---------------------------------------------------------------------------
 
 def xywhn_to_xyxy(box, width, height):
     x_center, y_center, w_norm, h_norm = box
@@ -80,6 +102,64 @@ def greedy_match(pred_boxes, gt_boxes, iou_threshold):
     return tp, fp, fn
 
 
+# ---------------------------------------------------------------------------
+# NMS entre fatias
+# ---------------------------------------------------------------------------
+
+def nms_boxes(boxes_with_scores, iou_threshold):
+    """
+    Aplica NMS em uma lista de (score, [x1, y1, x2, y2]).
+    Retorna lista de boxes sobreviventes em coordenadas absolutas.
+    """
+    if not boxes_with_scores:
+        return []
+
+    # Ordena por score decrescente
+    sorted_boxes = sorted(boxes_with_scores, key=lambda x: x[0], reverse=True)
+
+    kept = []
+    suppressed = set()
+
+    for i, (score_i, box_i) in enumerate(sorted_boxes):
+        if i in suppressed:
+            continue
+        kept.append(box_i)
+        for j, (score_j, box_j) in enumerate(sorted_boxes):
+            if j <= i or j in suppressed:
+                continue
+            if iou_xyxy(box_i, box_j) >= iou_threshold:
+                suppressed.add(j)
+
+    return kept
+
+
+def get_slice_coords(img_w, img_h, overlap):
+    """
+    Retorna as coordenadas (x0, y0, x1, y1) de cada uma das 4 fatias,
+    usando a mesma logica do slice_dataset.py.
+    """
+    slice_w = int(img_w * (0.5 + overlap / 2))
+    slice_h = int(img_h * (0.5 + overlap / 2))
+
+    starts = [
+        (0, 0),
+        (img_w - slice_w, 0),
+        (0, img_h - slice_h),
+        (img_w - slice_w, img_h - slice_h),
+    ]
+
+    coords = []
+    for x0, y0 in starts:
+        x1 = x0 + slice_w
+        y1 = y0 + slice_h
+        coords.append((x0, y0, x1, y1))
+    return coords
+
+
+# ---------------------------------------------------------------------------
+# Leitura de dados
+# ---------------------------------------------------------------------------
+
 def load_data_config(data_yaml):
     with open(data_yaml, "r", encoding="utf-8") as file:
         data = yaml.safe_load(file)
@@ -123,22 +203,173 @@ def read_gt_boxes(label_path, image_path):
     return boxes
 
 
-def extract_pred_boxes(result):
+def extract_pred_boxes_with_scores(result):
+    """Retorna lista de (score, [x1, y1, x2, y2]) para classe 0."""
     if result.boxes is None or len(result.boxes) == 0:
         return []
 
     xyxy = result.boxes.xyxy.tolist()
     classes = result.boxes.cls.tolist()
+    scores = result.boxes.conf.tolist()
 
     boxes = []
-    for box, cls_id in zip(xyxy, classes):
+    for box, cls_id, score in zip(xyxy, classes, scores):
         if int(cls_id) != 0:
             continue
-        boxes.append(box)
+        boxes.append((score, box))
     return boxes
 
 
-def evaluate_split(model, split_name, images_dir, labels_dir, iou_threshold, conf, imgsz, device):
+# ---------------------------------------------------------------------------
+# Inferencia
+# ---------------------------------------------------------------------------
+
+def predict_full_image_with_scores(model, image_path, conf, imgsz, device):
+    """Inferencia normal na imagem inteira. Retorna lista de (score, box)."""
+    result = model.predict(
+        source=str(image_path),
+        conf=conf,
+        imgsz=imgsz,
+        device=device,
+        verbose=False,
+    )[0]
+    return extract_pred_boxes_with_scores(result)
+
+
+def predict_full_image(model, image_path, conf, imgsz, device):
+    boxes_with_scores = predict_full_image_with_scores(model, image_path, conf, imgsz, device)
+    return [box for _, box in boxes_with_scores]
+
+
+def predict_sliced_with_scores(model, image_path, conf, imgsz, device, overlap, slice_nms_iou):
+    """
+    Divide a imagem em 4 fatias com sobreposicao, roda inferencia em cada uma,
+    converte as coordenadas de volta para a imagem original e aplica NMS global.
+    Retorna lista de (score, box).
+    """
+    with Image.open(image_path) as img:
+        img_w, img_h = img.size
+        slice_coords = get_slice_coords(img_w, img_h, overlap)
+
+        all_boxes_with_scores = []
+
+        for x0, y0, x1, y1 in slice_coords:
+            fatia = img.crop((x0, y0, x1, y1))
+
+            result = model.predict(
+                source=fatia,
+                conf=conf,
+                imgsz=imgsz,
+                device=device,
+                verbose=False,
+            )[0]
+
+            boxes_with_scores = extract_pred_boxes_with_scores(result)
+
+            for score, box in boxes_with_scores:
+                bx1, by1, bx2, by2 = box
+                abs_box = [bx1 + x0, by1 + y0, bx2 + x0, by2 + y0]
+                all_boxes_with_scores.append((score, abs_box))
+
+    # NMS global para remover duplicatas nas regioes de sobreposicao
+    kept_boxes = nms_boxes(all_boxes_with_scores, iou_threshold=slice_nms_iou)
+    # Recupera scores dos boxes mantidos
+    result_with_scores = []
+    for kept_box in kept_boxes:
+        for score, box in all_boxes_with_scores:
+            if box == kept_box:
+                result_with_scores.append((score, kept_box))
+                break
+    return result_with_scores
+
+
+def predict_sliced(model, image_path, conf, imgsz, device, overlap, slice_nms_iou):
+    boxes_with_scores = predict_sliced_with_scores(model, image_path, conf, imgsz, device, overlap, slice_nms_iou)
+    return [box for _, box in boxes_with_scores]
+
+
+# ---------------------------------------------------------------------------
+# Avaliacao por split
+# ---------------------------------------------------------------------------
+
+def compute_ap(precisions, recalls):
+    """
+    Calcula a Average Precision (AP) usando interpolacao de 11 pontos.
+    precisions e recalls sao listas ordenadas por threshold decrescente.
+    """
+    ap = 0.0
+    for thr in [i / 10.0 for i in range(11)]:
+        prec_at_thr = [p for p, r in zip(precisions, recalls) if r >= thr]
+        ap += max(prec_at_thr) if prec_at_thr else 0.0
+    return ap / 11.0
+
+
+def compute_map50(pred_boxes_per_image, gt_boxes_per_image, iou_threshold):
+    """
+    Calcula mAP50 acumulando TP/FP por score e construindo a curva P-R.
+    pred_boxes_per_image: lista de listas de (score, box)
+    gt_boxes_per_image:   lista de listas de boxes gt
+    """
+    # Coleta todas as deteccoes com score
+    all_detections = []  # (score, image_idx, box)
+    for img_idx, boxes in enumerate(pred_boxes_per_image):
+        for score, box in boxes:
+            all_detections.append((score, img_idx, box))
+
+    # Ordena por score decrescente
+    all_detections.sort(key=lambda x: x[0], reverse=True)
+
+    total_gt = sum(len(gt) for gt in gt_boxes_per_image)
+    if total_gt == 0:
+        return 0.0
+
+    matched_gt = [set() for _ in gt_boxes_per_image]
+    tp_list = []
+    fp_list = []
+
+    for score, img_idx, pred_box in all_detections:
+        gt_boxes = gt_boxes_per_image[img_idx]
+        best_iou = 0.0
+        best_gi = -1
+
+        for gi, gt_box in enumerate(gt_boxes):
+            if gi in matched_gt[img_idx]:
+                continue
+            iou = iou_xyxy(pred_box, gt_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_gi = gi
+
+        if best_iou >= iou_threshold and best_gi >= 0:
+            tp_list.append(1)
+            fp_list.append(0)
+            matched_gt[img_idx].add(best_gi)
+        else:
+            tp_list.append(0)
+            fp_list.append(1)
+
+    # Curva P-R acumulada
+    tp_cum = []
+    fp_cum = []
+    running_tp = 0
+    running_fp = 0
+    for tp, fp in zip(tp_list, fp_list):
+        running_tp += tp
+        running_fp += fp
+        tp_cum.append(running_tp)
+        fp_cum.append(running_fp)
+
+    precisions = [tp / (tp + fp) if (tp + fp) > 0 else 0.0 for tp, fp in zip(tp_cum, fp_cum)]
+    recalls = [tp / total_gt for tp in tp_cum]
+
+    return compute_ap(precisions, recalls)
+
+
+def evaluate_split(
+    model, split_name, images_dir, labels_dir,
+    iou_threshold, conf, imgsz, device,
+    sliced, overlap, slice_nms_iou,
+):
     image_paths = sorted([p for p in images_dir.glob("*") if p.is_file()])
 
     tp_total = 0
@@ -147,18 +378,39 @@ def evaluate_split(model, split_name, images_dir, labels_dir, iou_threshold, con
     abs_errors = []
     sq_errors = []
 
+    # Para mAP50
+    pred_boxes_per_image = []  # lista de (score, box)
+    gt_boxes_per_image = []
+
+    skipped = 0
     for image_path in image_paths:
         label_path = labels_dir / f"{image_path.stem}.txt"
-        gt_boxes = read_gt_boxes(label_path, image_path)
+        try:
+            gt_boxes = read_gt_boxes(label_path, image_path)
+        except Exception as e:
+            print(f"  [aviso] Pulando imagem corrompida: {image_path.name} ({e})")
+            skipped += 1
+            continue
 
-        result = model.predict(
-            source=str(image_path),
-            conf=conf,
-            imgsz=imgsz,
-            device=device,
-            verbose=False,
-        )[0]
-        pred_boxes = extract_pred_boxes(result)
+        gt_boxes_per_image.append(gt_boxes)
+
+        try:
+            if sliced:
+                pred_boxes_with_scores = predict_sliced_with_scores(
+                    model, image_path, conf, imgsz, device, overlap, slice_nms_iou
+                )
+            else:
+                pred_boxes_with_scores = predict_full_image_with_scores(
+                    model, image_path, conf, imgsz, device
+                )
+        except Exception as e:
+            print(f"  [aviso] Erro na inferencia: {image_path.name} ({e})")
+            skipped += 1
+            gt_boxes_per_image.pop()
+            continue
+
+        pred_boxes_per_image.append(pred_boxes_with_scores)
+        pred_boxes = [box for _, box in pred_boxes_with_scores]
 
         tp, fp, fn = greedy_match(pred_boxes, gt_boxes, iou_threshold)
         tp_total += tp
@@ -168,6 +420,9 @@ def evaluate_split(model, split_name, images_dir, labels_dir, iou_threshold, con
         count_error = abs(len(pred_boxes) - len(gt_boxes))
         abs_errors.append(count_error)
         sq_errors.append(count_error ** 2)
+
+    if skipped:
+        print(f"  [aviso] {skipped} imagem(ns) ignorada(s) por erro")
 
     precision = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0.0
     recall = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0.0
@@ -179,20 +434,27 @@ def evaluate_split(model, split_name, images_dir, labels_dir, iou_threshold, con
 
     mae = sum(abs_errors) / len(abs_errors) if abs_errors else 0.0
     rmse = math.sqrt(sum(sq_errors) / len(sq_errors)) if sq_errors else 0.0
+    map50 = compute_map50(pred_boxes_per_image, gt_boxes_per_image, iou_threshold)
 
     return {
         "split": split_name,
         "images": len(image_paths),
+        "sliced": sliced,
         "tp": tp_total,
         "fp": fp_total,
         "fn": fn_total,
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "map50": map50,
         "mae": mae,
         "rmse": rmse,
     }
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
@@ -205,6 +467,9 @@ def main():
     data_cfg = load_data_config(args.data)
     model = YOLO(str(args.weights))
 
+    modo = "sliced" if args.sliced else "full"
+    print(f"Modo de inferencia: {modo}")
+
     metrics = {
         "weights": str(args.weights),
         "data": str(args.data),
@@ -212,6 +477,9 @@ def main():
         "conf": args.conf,
         "imgsz": args.imgsz,
         "device": args.device,
+        "sliced": args.sliced,
+        "overlap": args.overlap if args.sliced else None,
+        "slice_nms_iou": args.slice_nms_iou if args.sliced else None,
         "results": [],
     }
 
@@ -232,6 +500,9 @@ def main():
             conf=args.conf,
             imgsz=args.imgsz,
             device=args.device,
+            sliced=args.sliced,
+            overlap=args.overlap,
+            slice_nms_iou=args.slice_nms_iou,
         )
         metrics["results"].append(split_metrics)
 
@@ -240,6 +511,7 @@ def main():
             f"P={split_metrics['precision']:.4f} "
             f"R={split_metrics['recall']:.4f} "
             f"F1={split_metrics['f1']:.4f} "
+            f"mAP50={split_metrics['map50']:.4f} "
             f"MAE={split_metrics['mae']:.4f} "
             f"RMSE={split_metrics['rmse']:.4f}"
         )

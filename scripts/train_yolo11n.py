@@ -5,18 +5,18 @@ from ultralytics import YOLO
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Treina YOLO11n com fine-tuning")
-    parser.add_argument("--weights", type=str, default="yolo11n.pt", help="Peso pre-treinado")
+    parser = argparse.ArgumentParser(description="Treina YOLO11s com fine-tuning")
+    parser.add_argument("--weights", type=str, default="yolo11s.pt", help="Peso pre-treinado")
     parser.add_argument("--data", type=Path, default=Path("dataset/data.yaml"), help="Arquivo data.yaml")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", type=str, default="0", help="Ex.: 0, cpu, 0,1")
-    parser.add_argument("--project", type=Path, default=Path("runs/yolo11n"))
+    parser.add_argument("--project", type=Path, default=Path("runs/yolo11s"))
     parser.add_argument("--name", type=str, default="finetune")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--patience", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=7)
     return parser.parse_args()
 
 
